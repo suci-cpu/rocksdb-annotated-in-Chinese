@@ -181,7 +181,7 @@ TEST_F(DBBasicTest, ReadOnlyDB) {
   ASSERT_OK(Put("bar", "v2"));
   ASSERT_OK(Put("foo", "v3"));
   Close();
-
+  std::cout << "db basic test can run there but debug can't";
   auto verify_one_iter = [&](Iterator* iter) {
     int count = 0;
     for (iter->SeekToFirst(); iter->Valid(); iter->Next()) {
