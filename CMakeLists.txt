@@ -1304,6 +1304,8 @@ if(WITH_TESTS)
         cache/compressed_secondary_cache_test.cc
         cache/lru_cache_test.cc
         cache/tiered_secondary_cache_test.cc
+            db/my/my_test.cc
+            db/my/insert_test_10000.cc
         db/blob/blob_counting_iterator_test.cc
         db/blob/blob_file_addition_test.cc
         db/blob/blob_file_builder_test.cc

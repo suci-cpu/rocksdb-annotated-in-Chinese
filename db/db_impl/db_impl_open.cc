@@ -297,6 +297,7 @@ Status DBImpl::ValidateOptions(const DBOptions& db_options) {
   return Status::OK();
 }
 
+//创建新的数据库
 Status DBImpl::NewDB(std::vector<std::string>* new_filenames) {
   VersionEdit new_db_edit;
   const WriteOptions write_options(Env::IOActivity::kDBOpen);
@@ -1847,21 +1848,34 @@ Status DBImpl::WriteLevel0TableForRecovery(int job_id, ColumnFamilyData* cfd,
 }
 
 Status DB::Open(const Options& options, const std::string& dbname, DB** dbptr) {
+  // 从提供的 Options 创建 DBOptions 和 ColumnFamilyOptions 实例
   DBOptions db_options(options);
   ColumnFamilyOptions cf_options(options);
+  // 创建一个 ColumnFamilyDescriptor 向量，用于存储列族的描述信息
   std::vector<ColumnFamilyDescriptor> column_families;
+  // 添加默认列族到列族描述向量中
   column_families.emplace_back(kDefaultColumnFamilyName, cf_options);
+  // 如果配置了持久化统计信息到磁盘，再添加一个用于存储统计信息的列族
   if (db_options.persist_stats_to_disk) {
     column_families.emplace_back(kPersistentStatsColumnFamilyName, cf_options);
   }
+  // 创建一个 ColumnFamilyHandle* 向量，用于存储打开数据库时返回的列族句柄
   std::vector<ColumnFamilyHandle*> handles;
+  // 调用重载的 DB::Open 函数，传入数据库选项、数据库名称、列族描述向量、列族句柄向量和数据库实例指针的地址
   Status s = DB::Open(db_options, dbname, column_families, &handles, dbptr);
+  // 如果打开数据库成功
   if (s.ok()) {
+    // 如果配置了持久化统计信息到磁盘，断言句柄向量的大小为2，否则为1
     if (db_options.persist_stats_to_disk) {
+      // 拥有 kDefaultColumnFamilyName、kPersistentStatsColumnFamilyName
       assert(handles.size() == 2);
     } else {
+      // 拥有 kDefaultColumnFamilyName
       assert(handles.size() == 1);
     }
+    // 因为 RocksDB 实现中默认会持有对所有列族的引用，包括默认列族，所以这里可以安全地删除这些句柄以避免内存泄漏。
+    // 如果数据库实现总是持有对默认列族的引用，我可以删除这个句柄
+    // 如果持久化统计信息到磁盘并且第二个句柄不为空，则删除它
     // i can delete the handle since DBImpl is always holding a reference to
     // default column family
     if (db_options.persist_stats_to_disk && handles[1] != nullptr) {
@@ -1875,16 +1889,32 @@ Status DB::Open(const Options& options, const std::string& dbname, DB** dbptr) {
 Status DB::Open(const DBOptions& db_options, const std::string& dbname,
                 const std::vector<ColumnFamilyDescriptor>& column_families,
                 std::vector<ColumnFamilyHandle*>* handles, DB** dbptr) {
+  // 设置是否为每个批次序列化
   const bool kSeqPerBatch = true;
+  // 设置是否为每个事务创建批次
   const bool kBatchPerTxn = true;
+  // 根据数据库选项启用或禁用线程跟踪
   ThreadStatusUtil::SetEnableTracking(db_options.enable_thread_tracking);
+  // 设置当前线程的操作类型为数据库打开操作
   ThreadStatusUtil::SetThreadOperation(ThreadStatus::OperationType::OP_DBOPEN);
   bool can_retry = false;
   Status s;
+  // 使用 do-while 循环尝试打开数据库，如果失败且可以重试，则继续尝试
   do {
+    // 调用 DBImpl::Open 函数实际打开数据库
+    // db_options: 数据库选项
+    // dbname: 数据库名称
+    // column_families: 列族描述列表
+    // handles: 列族句柄指针列表
+    // dbptr: 数据库实例指针的地址
+    // !kSeqPerBatch: 是否为每个批次序列化
+    // kBatchPerTxn: 是否为每个事务创建批次
+    // can_retry: 是否可以重试
+    // &can_retry: can_retry变量的地址，用于在重试时更新状态
     s = DBImpl::Open(db_options, dbname, column_families, handles, dbptr,
                      !kSeqPerBatch, kBatchPerTxn, can_retry, &can_retry);
   } while (!s.ok() && can_retry);
+  // 重置线程状态
   ThreadStatusUtil::ResetThreadStatus();
   return s;
 }

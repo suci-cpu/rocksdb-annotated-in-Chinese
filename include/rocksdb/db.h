@@ -182,8 +182,7 @@ class DB {
   // this guarantee in a custom Env implementation.)
   //
   // Caller must delete *dbptr when it is no longer needed.
-  static Status Open(const Options& options, const std::string& name,
-                     DB** dbptr);
+  static Status Open(const Options& options, const std::string& name, DB** dbptr);
 
   // Open DB with column families.
   // db_options specify database specific options
