@@ -47,9 +47,9 @@ class InsertTest : public testing::Test {
   }
 };
 
-// 测试用例：InsertMany
+// 测试用例：Insert10000 插入1w数据花费时间 check 1w数据花费时间 flush 1w数据花费时间 check 1w数据花费时间
 TEST_F(InsertTest, Insert10000) {
-  std::cout << "begin Insert 10000 many test" << std::endl;
+  std::cout << "begin Insert 10000 test" << std::endl;
   std::cout << convertToPath(db_name_) << std::endl;
 
   std::cout << "Insert 10000 begin" << std::endl;
@@ -68,6 +68,20 @@ TEST_F(InsertTest, Insert10000) {
   // 输出插入操作所花费的时间
   std::cout << "Insert 10000 records took " << insert_time.count() << " milliseconds" << std::endl << std::endl;
 
+  std::cout << "check 10000 begin" << std::endl;
+  auto check_before_flush_start = std::chrono::high_resolution_clock::now();
+  // 验证数据是否正确（可选）
+  for (int i = 0; i < 10000; ++i) {
+    std::string key = "key" + std::to_string(i);
+    std::string value;
+    ASSERT_OK(db_->Get(ReadOptions(), Slice(key), &value));
+    ASSERT_EQ(value, "value" + std::to_string(i));
+  }
+  auto check_before_flush_end = std::chrono::high_resolution_clock::now();
+  std::cout << "check 10000 end" << std::endl;
+  std::chrono::duration<double, std::milli> check_before_flush_time = check_before_flush_end - check_before_flush_start;
+  std::cout << "check 10000 records took " << check_before_flush_time.count() << " milliseconds" << std::endl << std::endl;
+
   std::cout << "flush 10000 begin" << std::endl;
   auto flush_start = std::chrono::high_resolution_clock::now();
   ASSERT_OK(db_->Flush(FlushOptions()));
@@ -77,7 +91,7 @@ TEST_F(InsertTest, Insert10000) {
   std::cout << "flush 10000 records took " << flush_time.count() << " milliseconds" << std::endl << std::endl;
 
   std::cout << "check 10000 begin" << std::endl;
-  auto check_start = std::chrono::high_resolution_clock::now();
+  auto check_after_flush_start = std::chrono::high_resolution_clock::now();
   // 验证数据是否正确（可选）
   for (int i = 0; i < 10000; ++i) {
     std::string key = "key" + std::to_string(i);
@@ -85,12 +99,12 @@ TEST_F(InsertTest, Insert10000) {
     ASSERT_OK(db_->Get(ReadOptions(), Slice(key), &value));
     ASSERT_EQ(value, "value" + std::to_string(i));
   }
-  auto check_end = std::chrono::high_resolution_clock::now();
+  auto check_after_flush_end = std::chrono::high_resolution_clock::now();
   std::cout << "check 10000 end" << std::endl;
-  std::chrono::duration<double, std::milli> check_time = check_end - check_start;
-  std::cout << "check 10000 records took " << check_time.count() << " milliseconds" << std::endl << std::endl;
+  std::chrono::duration<double, std::milli> check_after_flush_time = check_after_flush_end - check_after_flush_start;
+  std::cout << "check 10000 records took " << check_after_flush_time.count() << " milliseconds" << std::endl << std::endl;
 
-  std::cout << "end insert many test" << std::endl;
+  std::cout << "end insert 10000 test" << std::endl;
 }
 
 TEST_F(InsertTest, FlushAndCompaction) {

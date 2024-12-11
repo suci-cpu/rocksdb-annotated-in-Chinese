@@ -2047,48 +2047,62 @@ Status DBImpl::Open(const DBOptions& db_options, const std::string& dbname,
                     std::vector<ColumnFamilyHandle*>* handles, DB** dbptr,
                     const bool seq_per_batch, const bool batch_per_txn,
                     const bool is_retry, bool* can_retry) {
+  // 定义打开数据库时使用的写和读选项，指定IO活动类型为数据库打开。
   const WriteOptions write_options(Env::IOActivity::kDBOpen);
   const ReadOptions read_options(Env::IOActivity::kDBOpen);
 
+  // 通过表 验证数据库选项和列族选项是否有效，如果无效则返回错误状态。
   Status s = ValidateOptionsByTable(db_options, column_families);
   if (!s.ok()) {
     return s;
   }
 
+  // 再次验证数据库选项和列族选项的有效性，如果无效则返回错误状态。
   s = ValidateOptions(db_options, column_families);
   if (!s.ok()) {
     return s;
   }
 
+  // 初始化数据库指针为nullptr，清空列族句柄列表。
   *dbptr = nullptr;
   assert(handles);
   handles->clear();
 
+  // 计算所有列族中最大的写缓冲区大小。
   size_t max_write_buffer_size = 0;
   for (const auto& cf : column_families) {
     max_write_buffer_size =
         std::max(max_write_buffer_size, cf.options.write_buffer_size);
   }
 
+  // 使用提供的数据库选项、数据库名称、是否序列化每批操作和是否每个事务批处理选项创建DBImpl实例。
   DBImpl* impl = new DBImpl(db_options, dbname, seq_per_batch, batch_per_txn);
+  // 如果info_log没有被正确初始化，则返回错误状态并删除DBImpl实例。
   if (!impl->immutable_db_options_.info_log) {
     s = impl->init_logger_creation_s_;
     delete impl;
     return s;
   } else {
+    // 确保logger创建成功。
     assert(impl->init_logger_creation_s_.ok());
   }
+  // 如果WAL目录不存在，则创建它。
+  // impl->immutable_db_options_.GetWalDir() 如果wal_dir为空，返回数据库路径db_paths[0].path，否则返回wal_dir
   s = impl->env_->CreateDirIfMissing(impl->immutable_db_options_.GetWalDir());
   if (s.ok()) {
+    // 如果数据库路径不存在，则为每个路径创建所需的目录。
     std::vector<std::string> paths;
+    // 由impl得到option中的db path
     for (auto& db_path : impl->immutable_db_options_.db_paths) {
       paths.emplace_back(db_path.path);
     }
+    // 由传入参数的列族中得到每个列族的path
     for (auto& cf : column_families) {
       for (auto& cf_path : cf.options.cf_paths) {
         paths.emplace_back(cf_path.path);
       }
     }
+    // 对所有path执行 如果不存在则创建目录
     for (const auto& path : paths) {
       s = impl->env_->CreateDirIfMissing(path);
       if (!s.ok()) {
@@ -2096,44 +2110,57 @@ Status DBImpl::Open(const DBOptions& db_options, const std::string& dbname,
       }
     }
 
+    // 如果数据库存储在单个路径中，启用自动恢复 以处理NoSpace错误。
     // For recovery from NoSpace() error, we can only handle
     // the case where the database is stored in a single path
     if (paths.size() <= 1) {
       impl->error_handler_.EnableAutoRecovery();
     }
   }
+  // 创建归档目录
   if (s.ok()) {
     s = impl->CreateArchivalDirectory();
   }
   if (!s.ok()) {
+    // 如果创建归档目录失败，则返回错误状态并删除DBImpl实例。
     delete impl;
     return s;
   }
 
+  // 设置wal_in_db_path_ WAL目录是否与数据库路径相同。
   impl->wal_in_db_path_ = impl->immutable_db_options_.IsWalDirSameAsDBPath();
+  // 初始化恢复上下文。
   RecoveryContext recovery_ctx;
+  // 加锁以保护选项和数据库状态。确保在恢复过程中数据库的选项和状态不会被并发修改，保证了恢复过程的线程安全性
   impl->options_mutex_.Lock();
   impl->mutex_.Lock();
 
+  // 处理创建数据库时的选项，如create_if_missing和error_if_exists，同时恢复数据库状态。
   // Handles create_if_missing, error_if_exists
   uint64_t recovered_seq(kMaxSequenceNumber);
+  // Recover函数尝试恢复数据库到最后一次一致的状态，recovered_seq变量用于存储恢复后的最大序列号
   s = impl->Recover(column_families, false /* read_only */,
                     false /* error_if_wal_file_exists */,
                     false /* error_if_data_exists_in_wals */, is_retry,
                     &recovered_seq, &recovery_ctx, can_retry);
+  // 如果恢复成功，则创建新的WAL文件。之前存在的WAL文件不再继续写入。
   if (s.ok()) {
     uint64_t new_log_number = impl->versions_->NewFileNumber();
     log::Writer* new_log = nullptr;
+    // 根据最大写缓冲区大小预分配WAL文件块。
     const size_t preallocate_block_size =
         impl->GetWalPreallocateBlockSize(max_write_buffer_size);
     s = impl->CreateWAL(write_options, new_log_number, 0 /*recycle_log_number*/,
                         preallocate_block_size, &new_log);
+    // 如果创建WAL文件成功，则设置最小可回收日志文件编号。避免回收由前一个数据库实例创建的日志文件，这些文件可能仍在使用中
     if (s.ok()) {
       // Prevent log files created by previous instance from being recycled.
       // They might be in alive_log_file_, and might get recycled otherwise.
       impl->min_log_number_to_recycle_ = new_log_number;
     }
+    // 如果创建WAL文件成功，则设置日志文件编号并添加到日志列表。
     if (s.ok()) {
+      // InstrumentedMutexLock用于锁定日志写入互斥锁，确保日志写入的原子性和一致性
       InstrumentedMutexLock wl(&impl->log_write_mutex_);
       impl->logfile_number_ = new_log_number;
       assert(new_log != nullptr);
@@ -2141,6 +2168,7 @@ Status DBImpl::Open(const DBOptions& db_options, const std::string& dbname,
       impl->logs_.emplace_back(new_log_number, new_log);
     }
 
+    // 如果恢复的序列号不是最大序列号，则在第一个日志文件中添加一个空批次（WriteBatch）以保持序列号连续性。
     if (s.ok()) {
       impl->alive_log_files_.emplace_back(impl->logfile_number_);
       // In WritePrepared there could be gap in sequence numbers. This breaks
@@ -2164,6 +2192,7 @@ Status DBImpl::Open(const DBOptions& db_options, const std::string& dbname,
         s = impl->WriteToWAL(empty_batch, write_options, log_writer, &log_used,
                              &log_size, log_file_number_size);
         if (s.ok()) {
+          // 如果写入WAL成功，则刷新WAL以确保数据持久化。
           // Need to fsync, otherwise it might get lost after a power reset.
           s = impl->FlushWAL(write_options, false);
           TEST_SYNC_POINT_CALLBACK("DBImpl::Open::BeforeSyncWAL", /*arg=*/&s);
@@ -2179,10 +2208,12 @@ Status DBImpl::Open(const DBOptions& db_options, const std::string& dbname,
       }
     }
   }
+  // 如果恢复操作成功，则记录并应用恢复操作。
   if (s.ok()) {
     s = impl->LogAndApplyForRecovery(recovery_ctx);
   }
 
+  // 如果没有设置写入身份文件，则删除过时的身份文件以避免数据库ID不一致。
   if (s.ok() && !impl->immutable_db_options_.write_identity_file) {
     // On successful recovery, delete an obsolete IDENTITY file to avoid DB ID
     // inconsistency
@@ -2190,12 +2221,15 @@ Status DBImpl::Open(const DBOptions& db_options, const std::string& dbname,
         .PermitUncheckedError();
   }
 
+  // 如果设置持久化统计信息到磁盘，则初始化持久化统计列族。
   if (s.ok() && impl->immutable_db_options_.persist_stats_to_disk) {
     impl->mutex_.AssertHeld();
     s = impl->InitPersistStatsColumnFamily();
   }
 
+  // 如果打开操作成功，则设置列族句柄。
   if (s.ok()) {
+    // 遍历所有列族描述符，为每个列族创建句柄。
     // set column family handles
     for (const auto& cf : column_families) {
       auto cfd =
@@ -2206,9 +2240,11 @@ Status DBImpl::Open(const DBOptions& db_options, const std::string& dbname,
         impl->NewThreadStatusCfInfo(cfd);
       } else {
         if (db_options.create_missing_column_families) {
+          // 如果列族不存在且允许创建缺失的列族，则创建它。
           // missing column family, create it
           ColumnFamilyHandle* handle = nullptr;
           impl->mutex_.Unlock();
+          // NOTE: 在这里，通常会在WrapUpCreateColumnFamilies中完成的工作将单独完成。
           // NOTE: the work normally done in WrapUpCreateColumnFamilies will
           // be done separately below.
           s = impl->CreateColumnFamilyImpl(read_options, write_options,
@@ -2227,6 +2263,7 @@ Status DBImpl::Open(const DBOptions& db_options, const std::string& dbname,
     }
   }
 
+  // 安装超级版本并计划工作。
   if (s.ok()) {
     SuperVersionContext sv_context(/* create_superversion */ true);
     for (auto cfd : *impl->versions_->GetColumnFamilySet()) {
@@ -2236,11 +2273,13 @@ Status DBImpl::Open(const DBOptions& db_options, const std::string& dbname,
     sv_context.Clean();
   }
 
+  // 处理持久化统计信息的格式版本。
   if (s.ok() && impl->immutable_db_options_.persist_stats_to_disk) {
     // try to read format version
     s = impl->PersistentStatsProcessFormatVersion();
   }
 
+  // 检查每个列族是否支持快照和合并操作符。
   if (s.ok()) {
     for (auto cfd : *impl->versions_->GetColumnFamilySet()) {
       if (!cfd->mem()->IsSnapshotSupported()) {
@@ -2261,6 +2300,7 @@ Status DBImpl::Open(const DBOptions& db_options, const std::string& dbname,
   TEST_SYNC_POINT("DBImpl::Open:Opened");
   Status persist_options_status;
   if (s.ok()) {
+    // 持久化RocksDB选项，然后计划压缩。
     // Persist RocksDB Options before scheduling the compaction.
     // The WriteOptionsFile() will release and lock the mutex internally.
     persist_options_status =
@@ -2272,6 +2312,7 @@ Status DBImpl::Open(const DBOptions& db_options, const std::string& dbname,
   }
   impl->mutex_.Unlock();
 
+  // 设置SstFileManager的统计信息指针。
   auto sfm = static_cast<SstFileManagerImpl*>(
       impl->immutable_db_options_.sst_file_manager.get());
   if (s.ok() && sfm) {
@@ -2283,6 +2324,7 @@ Status DBImpl::Open(const DBOptions& db_options, const std::string& dbname,
 
     impl->TrackExistingDataFiles(recovery_ctx.existing_data_files_);
 
+    // 保留一些磁盘缓冲空间。
     // Reserve some disk buffer space. This is a heuristic - when we run out
     // of disk space, this ensures that there is at least write_buffer_size
     // amount of free space before we resume DB writes. In low disk space
@@ -2292,7 +2334,9 @@ Status DBImpl::Open(const DBOptions& db_options, const std::string& dbname,
                            impl->immutable_db_options_.db_paths[0].path);
   }
 
+  // 如果数据库打开成功，清理.trash文件并删除过时的文件。
   if (s.ok()) {
+    // 遍历所有数据库路径，清理.trash文件。
     // When the DB is stopped, it's possible that there are some .trash files
     // that were not deleted yet, when we open the DB we will find these .trash
     // files and schedule them to be deleted (or delete immediately if
@@ -2307,13 +2351,16 @@ Status DBImpl::Open(const DBOptions& db_options, const std::string& dbname,
           .PermitUncheckedError();
     }
     impl->mutex_.Lock();
+    // 删除过时的文件。
     // This will do a full scan.
     impl->DeleteObsoleteFiles();
     TEST_SYNC_POINT("DBImpl::Open:AfterDeleteFiles");
+    // 可能需要进行flush或compaction。
     impl->MaybeScheduleFlushOrCompaction();
     impl->mutex_.Unlock();
   }
 
+  // 如果WAL缓冲区不为空，则刷新WAL以确保数据持久化。
   if (s.ok()) {
     ROCKS_LOG_HEADER(impl->immutable_db_options_.info_log, "DB pointer %p",
                      impl);
@@ -2321,6 +2368,7 @@ Status DBImpl::Open(const DBOptions& db_options, const std::string& dbname,
     if (!impl->WALBufferIsEmpty()) {
       s = impl->FlushWAL(write_options, false);
       if (s.ok()) {
+        // 需要同步WAL以确保数据在电源重置后不会丢失。
         // Sync is needed otherwise WAL buffered data might get lost after a
         // power reset.
         log::Writer* log_writer = impl->logs_.back().writer;
@@ -2332,24 +2380,29 @@ Status DBImpl::Open(const DBOptions& db_options, const std::string& dbname,
         }
       }
     }
+    // 如果持久化选项文件失败，则返回IO错误。
     if (s.ok() && !persist_options_status.ok()) {
       s = Status::IOError(
           "DB::Open() failed --- Unable to persist Options file",
           persist_options_status.ToString());
     }
   }
+  // 如果打开数据库失败，则记录警告日志。
   if (!s.ok()) {
     ROCKS_LOG_WARN(impl->immutable_db_options_.info_log,
                    "DB::Open() failed: %s", s.ToString().c_str());
   }
+  // 如果数据库打开成功，则启动定期任务调度器。
   if (s.ok()) {
     s = impl->StartPeriodicTaskScheduler();
   }
+  // 如果数据库打开成功，则注册记录序列号时间的工作。
   if (s.ok()) {
     s = impl->RegisterRecordSeqnoTimeWorker(read_options, write_options,
                                             recovery_ctx.is_new_db_);
   }
   impl->options_mutex_.Unlock();
+  // 如果在打开过程中出现任何错误，则清理资源并返回失败。
   if (!s.ok()) {
     for (auto* h : *handles) {
       delete h;
@@ -2358,6 +2411,7 @@ Status DBImpl::Open(const DBOptions& db_options, const std::string& dbname,
     delete impl;
     *dbptr = nullptr;
   }
+  // 返回打开数据库的操作结果。
   return s;
 }
 }  // namespace ROCKSDB_NAMESPACE
